@@ -9,9 +9,9 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import InMemoryVectorStore
 from langchain.agents import create_agent
-from langchain.tools import tool
 from langchain_groq import ChatGroq
 from langgraph.checkpoint.memory import InMemorySaver
+from langchain.tools import Tool
 
 # ---------------- UI ----------------
 st.set_page_config(
@@ -53,7 +53,7 @@ def process_document(path):
     )
     docs = splitter.split_documents(docs)
 
-    # Embeddings (Google)
+    # Embeddings
     embeddings = GoogleGenerativeAIEmbeddings(
         model="gemini-embedding-2-preview"
     )
@@ -69,11 +69,16 @@ def process_document(path):
     # LLM
     llm = ChatGroq(model="openai/gpt-oss-20b")
 
-    # Tool
-    @tool
-    def retrieve_context(query: str):
+    # 🔥 TOOL FIX (no @tool)
+    def retrieve_context_fn(query: str) -> str:
         docs = st.session_state.vector_store.similarity_search(query, k=4)
         return "\n".join([doc.page_content for doc in docs])
+
+    retrieve_context = Tool(
+        name="retrieve_context",
+        func=retrieve_context_fn,
+        description="Retrieve relevant context from uploaded PDF"
+    )
 
     # Prompt
     system_prompt = """You are a helpful assistant.
@@ -108,7 +113,7 @@ with st.sidebar:
 
             path = "./docs_files"
 
-            # 🧹 IMPORTANT: Purana data delete karo
+            # 🧹 Clear old files
             if os.path.exists(path):
                 for f in os.listdir(path):
                     os.remove(os.path.join(path, f))
@@ -120,12 +125,11 @@ with st.sidebar:
                 with open(f"{path}/{file.name}", "wb") as f:
                     f.write(file.getvalue())
 
-            # Reset old session
+            # Reset session
             st.session_state.agent = None
             st.session_state.vector_store = None
             st.session_state.messages = []
 
-            # Process new docs
             process_document(path)
 
             st.success("✅ Documents processed!")
