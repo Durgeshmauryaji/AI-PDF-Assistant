@@ -1,5 +1,5 @@
 # =========================
-# 📄 AI PDF Assistant (RAG)
+# 📄 AI PDF Assistant (LATEST RAG)
 # =========================
 
 from dotenv import load_dotenv
@@ -8,16 +8,21 @@ load_dotenv()
 import os
 import streamlit as st
 
-# LangChain imports
+# LangChain (LATEST)
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import InMemoryVectorStore
-from langchain.chains import RetrievalQA
+
 from langchain_groq import ChatGroq
 
+# NEW CHAINS (IMPORTANT)
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.prompts import ChatPromptTemplate
+
 # =========================
-# 🎨 UI Setup
+# 🎨 UI
 # =========================
 st.set_page_config(page_title="PDF AI Assistant", page_icon="📄", layout="wide")
 
@@ -36,12 +41,11 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 # =========================
-# 📂 Process PDFs (RAG Pipeline)
+# 📂 PROCESS PDFs
 # =========================
 def process_pdfs(uploaded_files):
     docs = []
 
-    # Save + Load PDFs
     os.makedirs("docs", exist_ok=True)
 
     for file in uploaded_files:
@@ -60,7 +64,7 @@ def process_pdfs(uploaded_files):
     )
     split_docs = splitter.split_documents(docs)
 
-    # Embeddings (FREE + FAST)
+    # Embeddings (FREE + STABLE)
     embeddings = HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
@@ -77,23 +81,37 @@ def process_pdfs(uploaded_files):
         temperature=0
     )
 
-    # RAG Chain
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        retriever=vector_db.as_retriever(search_kwargs={"k": 4}),
-        return_source_documents=True
-    )
+    # Retriever
+    retriever = vector_db.as_retriever(search_kwargs={"k": 4})
+
+    # Prompt (STRICT)
+    prompt = ChatPromptTemplate.from_template("""
+You are a helpful AI assistant.
+
+Answer ONLY from the provided context.
+If the answer is not present, say: "Not found in document."
+
+Context:
+{context}
+
+Question:
+{input}
+""")
+
+    # Chains (LATEST)
+    document_chain = create_stuff_documents_chain(llm, prompt)
+    qa_chain = create_retrieval_chain(retriever, document_chain)
 
     return qa_chain
 
 # =========================
-# 📂 Sidebar (Upload)
+# 📂 SIDEBAR
 # =========================
 with st.sidebar:
     st.header("📂 Upload PDFs")
 
     uploaded_files = st.file_uploader(
-        "Upload one or more PDFs",
+        "Upload PDFs",
         type=["pdf"],
         accept_multiple_files=True
     )
@@ -101,20 +119,20 @@ with st.sidebar:
     if uploaded_files:
         with st.spinner("Processing PDFs..."):
             st.session_state.qa_chain = process_pdfs(uploaded_files)
-        st.success("✅ PDFs processed successfully!")
+        st.success("✅ PDFs processed!")
 
     if st.button("🧹 Clear Chat"):
         st.session_state.messages = []
         st.rerun()
 
 # =========================
-# 💬 Chat UI
+# 💬 CHAT UI
 # =========================
 if st.session_state.qa_chain:
 
     st.markdown("### 💬 Chat with your PDF")
 
-    # Display chat history
+    # Chat history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -123,21 +141,19 @@ if st.session_state.qa_chain:
     user_input = st.chat_input("Ask something from your PDF...")
 
     if user_input:
-        # Show user message
         st.session_state.messages.append({"role": "user", "content": user_input})
+
         with st.chat_message("user"):
             st.markdown(user_input)
 
-        # Generate answer
         with st.spinner("🤖 Thinking..."):
-            response = st.session_state.qa_chain.invoke({"query": user_input})
-            answer = response["result"]
+            response = st.session_state.qa_chain.invoke({"input": user_input})
+            answer = response["answer"]
 
-        # Show assistant response
         with st.chat_message("assistant"):
             st.markdown(answer)
 
         st.session_state.messages.append({"role": "assistant", "content": answer})
 
 else:
-    st.info("👈 Upload a PDF to start chatting")
+    st.info("👈 Upload PDF to start chatting")
