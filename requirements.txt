@@ -1,13 +1,18 @@
-streamlit==1.35.0
-python-dotenv==1.0.1
+python-dotenv
 
-langchain==0.2.14
-langchain-community==0.2.12
-langchain-core==0.2.35
+streamlit
 
-langchain-groq==0.1.9
+langchain
+langchain-community
+langchain-core
 
-pypdf==4.2.0
+langchain-google-genai
+langchain-groq
 
-sentence-transformers==2.7.0
-huggingface_hub==0.23.4
+langgraph
+
+pypdf
+
+sentence-transformers
+
+huggingface_hub
