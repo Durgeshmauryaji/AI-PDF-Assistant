@@ -1,137 +1,171 @@
-# =========================
-# 📄 AI PDF Assistant (STABLE VERSION)
-# =========================
-
 from dotenv import load_dotenv
 load_dotenv()
 
-import os
-import streamlit as st
-
-# LangChain
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-
+from langchain_community.document_loaders import PyPDFLoader,PyPDFDirectoryLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_community.vectorstores import InMemoryVectorStore
+from langchain.agents import create_agent
+from langchain.tools import tool
 from langchain_groq import ChatGroq
-from langchain.chains import RetrievalQA
+from langgraph.checkpoint.memory import InMemorySaver
+import streamlit as st
+from langchain_community.embeddings import HuggingFaceEmbeddings
 
-# =========================
-# UI
-# =========================
-st.set_page_config(page_title="PDF AI Assistant", page_icon="📄", layout="wide")
+st.set_page_config(
+    page_title="PDF AI Assistant",
+    page_icon="📄",
+    layout="wide"
+)
 
-st.title("📄 AI PDF Assistant")
+st.markdown("""
+    <h1 style='text-align: center; color: #4CAF50;'>
+        📄 AI PDF Assistant
+    </h1>
+    <p style='text-align: center;'>
+        Upload your documents and ask intelligent questions
+    </p>
+""", unsafe_allow_html=True)
 
-# =========================
-# Session State
-# =========================
-if "qa_chain" not in st.session_state:
-    st.session_state.qa_chain = None
+
+
+
+# Data in st session state
+# While file not uploaded, document_uploaded is False and agent is None. Once file is uploaded, document_uploaded becomes True and agent is created.
+if "document_uploaded" not in st.session_state:
+    st.session_state.document_uploaded=False
+
+if "agent" not in st.session_state:
+    st.session_state.agent=None
+
+if "vector_store" not in st.session_state:
+    st.session_state.vector_store=None
 
 if "messages" not in st.session_state:
-    st.session_state.messages = []
+    st.session_state.messages=[]
 
-# =========================
-# PROCESS PDF
-# =========================
-def process_pdfs(uploaded_files):
-    docs = []
+# Document processing 
+def process_document(file):
+    """Processes the uploaded PDF document and creates the agent."""
+    # Load the PDF document
+    loader=PyPDFLoader(file)
+    docs=loader.load()
 
-    os.makedirs("docs", exist_ok=True)
+    # Split the document into smaller chunks
+    splitter=RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=200)
+    docs=splitter.split_documents(documents=docs)
 
-    for file in uploaded_files:
-        path = os.path.join("docs", file.name)
-
-        with open(path, "wb") as f:
-            f.write(file.getvalue())
-
-        loader = PyPDFLoader(path)
-        docs.extend(loader.load())
-
-    # Split
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=100
-    )
-    docs = splitter.split_documents(docs)
-
-    # Embeddings
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    # Embeddings and vector store
+    embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-2-preview")
+    
+    vector_db=InMemoryVectorStore.from_documents(
+        documents=docs, 
+        embedding=embeddings
     )
 
-    # Vector Store (FAISS = better)
-    vector_db = FAISS.from_documents(docs, embeddings)
+    # Create a Agent--LLM, Tool and prompt
+    llm = ChatGroq(model="openai/gpt-oss-20b")
 
-    # LLM
-    llm = ChatGroq(
-        model="llama3-8b-8192",
-        temperature=0
+    @tool
+    def retrieve_context(query:str):
+        """Retrieves relevant context from the vector store based on the query."""
+        context=""
+        docs=vector_db.similarity_search(query=query,k=4)
+        for doc in docs:
+            context+=doc.page_content
+        return context    
+
+    system_prompt = """You are a helpful assistant.
+    ALWAYS use the retrieve_context tool to get relevant information from the document before answering.
+    Do NOT answer from your own knowledge.
+    After retrieving context, answer strictly based on it.
+    """
+
+    memory=InMemorySaver()
+
+    agent=create_agent(
+        model=llm,
+        tools=[retrieve_context],
+        system_prompt=system_prompt,
+        checkpointer=memory
     )
 
-    # RAG Chain (OLD but stable)
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        retriever=vector_db.as_retriever(search_kwargs={"k": 4}),
-        return_source_documents=True
-    )
+    st.session_state.agent=agent
+    st.session_state.document_uploaded=True
 
-    return qa_chain
 
-# =========================
-# SIDEBAR
-# =========================
+# Upload file and ask questions in Streamlit
 with st.sidebar:
-    st.header("Upload PDFs")
+    st.header("📂 Upload Documents")
 
-    files = st.file_uploader(
-        "Upload",
+    uploaded = st.file_uploader(
+        "Upload PDF files",
         type=["pdf"],
         accept_multiple_files=True
     )
 
-    if files:
+    if uploaded and not st.session_state.document_uploaded:
         with st.spinner("Processing..."):
-            st.session_state.qa_chain = process_pdfs(files)
-        st.success("Done!")
+            path = "./docs_files"
 
-    if st.button("Clear Chat"):
+            import os
+            os.makedirs(path, exist_ok=True)
+
+            for file in uploaded:
+                with open(f"{path}/{file.name}", "wb") as f:
+                    f.write(file.getvalue())
+
+            process_document(path)
+            st.success("✅ Documents processed!")
+
+    st.markdown("---")
+
+    if st.button("🧹 Clear Chat"):
         st.session_state.messages = []
         st.rerun()
 
-# =========================
-# CHAT
-# =========================
-if st.session_state.qa_chain:
 
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.write(msg["content"])
 
-    query = st.chat_input("Ask from PDF...")
 
-    if query:
-        st.session_state.messages.append({"role": "user", "content": query})
+# Chat interface
+if st.session_state.document_uploaded and st.session_state.agent:
 
-        with st.chat_message("user"):
-            st.write(query)
+    st.markdown("### 💬 Chat with your document")
 
-        with st.spinner("Thinking..."):
-            response = st.session_state.qa_chain.invoke({"query": query})
+    # Chat container
+    chat_container = st.container()
 
-            answer = response["result"]
-            sources = response["source_documents"]
+    with chat_container:
+        for msg in st.session_state.messages:
+            if msg["role"] == "user":
+                st.chat_message("user").markdown(msg["content"])
+            else:
+                st.chat_message("assistant").markdown(msg["content"])
 
-        with st.chat_message("assistant"):
-            st.write(answer)
+    # Input box
+    user_input = st.chat_input("Ask something from your PDF...")
 
-            with st.expander("Sources"):
-                for doc in sources:
-                    st.write(doc.page_content[:300])
+    if user_input:
+        st.session_state.messages.append({
+            "role": "user",
+            "content": user_input
+        })
 
-        st.session_state.messages.append({"role": "assistant", "content": answer})
+        st.chat_message("user").markdown(user_input)
 
-else:
-    st.info("Upload PDF to start")
+        with st.spinner("🤖 Thinking..."):
+
+            response = st.session_state.agent.invoke(
+                {"messages":[{"role":"user","content":user_input}]},
+                {"configurable":{"thread_id":1}}
+            )
+
+            answer = response["messages"][-1].content
+
+            st.chat_message("assistant").markdown(answer)
+
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer
+            })
+    
