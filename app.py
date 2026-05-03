@@ -1,19 +1,17 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-import streamlit as st
-import os
-
-from langchain_community.document_loaders import PyPDFDirectoryLoader
+from langchain_community.document_loaders import PyPDFLoader,PyPDFDirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import InMemoryVectorStore
 from langchain.agents import create_agent
+from langchain.tools import tool
 from langchain_groq import ChatGroq
 from langgraph.checkpoint.memory import InMemorySaver
-from langchain_core.tools import Tool
+import streamlit as st
+from langchain_community.embeddings import HuggingFaceEmbeddings
 
-# ---------------- UI ----------------
 st.set_page_config(
     page_title="PDF AI Assistant",
     page_icon="📄",
@@ -21,78 +19,82 @@ st.set_page_config(
 )
 
 st.markdown("""
-<h1 style='text-align: center; color: #4CAF50;'>
-📄 AI PDF Assistant
-</h1>
-<p style='text-align: center;'>
-Upload your documents and ask intelligent questions
-</p>
+    <h1 style='text-align: center; color: #4CAF50;'>
+        📄 AI PDF Assistant
+    </h1>
+    <p style='text-align: center;'>
+        Upload your documents and ask intelligent questions
+    </p>
 """, unsafe_allow_html=True)
 
-# ---------------- Session State ----------------
+
+
+
+# Data in st session state
+# While file not uploaded, document_uploaded is False and agent is None. Once file is uploaded, document_uploaded becomes True and agent is created.
+if "document_uploaded" not in st.session_state:
+    st.session_state.document_uploaded=False
+
 if "agent" not in st.session_state:
-    st.session_state.agent = None
+    st.session_state.agent=None
 
 if "vector_store" not in st.session_state:
-    st.session_state.vector_store = None
+    st.session_state.vector_store=None
 
 if "messages" not in st.session_state:
-    st.session_state.messages = []
+    st.session_state.messages=[]
 
-# ---------------- Process Document ----------------
-def process_document(path):
+# Document processing 
+def process_document(file):
+    """Processes the uploaded PDF document and creates the agent."""
+    # Load the PDF document
+    loader=PyPDFDirectoryLoader(file)
+    docs=loader.load()
 
-    loader = PyPDFDirectoryLoader(path)
-    docs = loader.load()
+    # Split the document into smaller chunks
+    splitter=RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=200)
+    docs=splitter.split_documents(documents=docs)
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=200
-    )
-    docs = splitter.split_documents(docs)
-
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model="gemini-embedding-2-preview"
-    )
-
-    vector_db = InMemoryVectorStore.from_documents(
-        documents=docs,
+    # Embeddings and vector store
+    embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-2-preview")
+    
+    vector_db=InMemoryVectorStore.from_documents(
+        documents=docs, 
         embedding=embeddings
     )
 
-    # ❗ IMPORTANT: vector_db को अंदर capture करो
-    def retrieve_context_fn(query: str) -> str:
-        docs = vector_db.similarity_search(query, k=4)
-        return "\n".join([doc.page_content for doc in docs])
-
-    from langchain_core.tools import Tool
-
-    retrieve_context = Tool(
-        name="retrieve_context",
-        func=retrieve_context_fn,
-        description="Retrieve relevant context from uploaded PDF"
-    )
-
+    # Create a Agent--LLM, Tool and prompt
     llm = ChatGroq(model="openai/gpt-oss-20b")
 
+    @tool
+    def retrieve_context(query:str):
+        """Retrieves relevant context from the vector store based on the query."""
+        context=""
+        docs=vector_db.similarity_search(query=query,k=4)
+        for doc in docs:
+            context+=doc.page_content
+        return context    
+
     system_prompt = """You are a helpful assistant.
-ALWAYS use the retrieve_context tool.
-Answer ONLY from document.
-If answer not found, say "Not found in document".
-"""
+    ALWAYS use the retrieve_context tool to get relevant information from the document before answering.
+    Do NOT answer from your own knowledge.
+    After retrieving context, answer strictly based on it.
+    """
 
-    memory = InMemorySaver()
+    memory=InMemorySaver()
 
-    agent = create_agent(
+    agent=create_agent(
         model=llm,
         tools=[retrieve_context],
         system_prompt=system_prompt,
         checkpointer=memory
     )
 
-    st.session_state.agent = agent
+    st.session_state.agent=agent
+    st.session_state.document_uploaded=True
 
-# ---------------- Sidebar ----------------
+
+# Upload file and ask questions in Streamlit
 with st.sidebar:
     st.header("📂 Upload Documents")
 
@@ -102,30 +104,18 @@ with st.sidebar:
         accept_multiple_files=True
     )
 
-    if uploaded:
+    if uploaded and not st.session_state.document_uploaded:
         with st.spinner("Processing..."):
-
             path = "./docs_files"
 
-            # 🧹 Clear old files
-            if os.path.exists(path):
-                for f in os.listdir(path):
-                    os.remove(os.path.join(path, f))
-
+            import os
             os.makedirs(path, exist_ok=True)
 
-            # Save new files
             for file in uploaded:
                 with open(f"{path}/{file.name}", "wb") as f:
                     f.write(file.getvalue())
 
-            # Reset session
-            st.session_state.agent = None
-            st.session_state.vector_store = None
-            st.session_state.messages = []
-
             process_document(path)
-
             st.success("✅ Documents processed!")
 
     st.markdown("---")
@@ -134,14 +124,25 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-# ---------------- Chat UI ----------------
-if st.session_state.agent:
+
+
+
+# Chat interface
+if st.session_state.document_uploaded and st.session_state.agent:
 
     st.markdown("### 💬 Chat with your document")
 
-    for msg in st.session_state.messages:
-        st.chat_message(msg["role"]).markdown(msg["content"])
+    # Chat container
+    chat_container = st.container()
 
+    with chat_container:
+        for msg in st.session_state.messages:
+            if msg["role"] == "user":
+                st.chat_message("user").markdown(msg["content"])
+            else:
+                st.chat_message("assistant").markdown(msg["content"])
+
+    # Input box
     user_input = st.chat_input("Ask something from your PDF...")
 
     if user_input:
@@ -155,8 +156,8 @@ if st.session_state.agent:
         with st.spinner("🤖 Thinking..."):
 
             response = st.session_state.agent.invoke(
-                {"messages": [{"role": "user", "content": user_input}]},
-                {"configurable": {"thread_id": 1}}
+                {"messages":[{"role":"user","content":user_input}]},
+                {"configurable":{"thread_id":1}}
             )
 
             answer = response["messages"][-1].content
@@ -167,3 +168,4 @@ if st.session_state.agent:
                 "role": "assistant",
                 "content": answer
             })
+    
