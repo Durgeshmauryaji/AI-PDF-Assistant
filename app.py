@@ -1,171 +1,170 @@
+# =========================
+# 📄 AI PDF Assistant (PRO RAG VERSION)
+# =========================
+
 from dotenv import load_dotenv
 load_dotenv()
 
-from langchain_community.document_loaders import PyPDFLoader,PyPDFDirectoryLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_community.vectorstores import InMemoryVectorStore
-from langchain.agents import create_agent
-from langchain.tools import tool
-from langchain_groq import ChatGroq
-from langgraph.checkpoint.memory import InMemorySaver
+import os
 import streamlit as st
-from langchain_community.embeddings import HuggingFaceEmbeddings
 
-st.set_page_config(
-    page_title="PDF AI Assistant",
-    page_icon="📄",
-    layout="wide"
-)
+# LangChain
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import InMemoryVectorStore
+
+from langchain_groq import ChatGroq
+
+# NEW RAG CHAINS
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.prompts import ChatPromptTemplate
+
+# =========================
+# 🎨 UI
+# =========================
+st.set_page_config(page_title="PDF AI Assistant", page_icon="📄", layout="wide")
 
 st.markdown("""
-    <h1 style='text-align: center; color: #4CAF50;'>
-        📄 AI PDF Assistant
-    </h1>
-    <p style='text-align: center;'>
-        Upload your documents and ask intelligent questions
-    </p>
+<h1 style='text-align:center; color:#4CAF50;'>📄 AI PDF Assistant</h1>
+<p style='text-align:center;'>Upload PDFs and ask questions</p>
 """, unsafe_allow_html=True)
 
-
-
-
-# Data in st session state
-# While file not uploaded, document_uploaded is False and agent is None. Once file is uploaded, document_uploaded becomes True and agent is created.
-if "document_uploaded" not in st.session_state:
-    st.session_state.document_uploaded=False
-
-if "agent" not in st.session_state:
-    st.session_state.agent=None
-
-if "vector_store" not in st.session_state:
-    st.session_state.vector_store=None
+# =========================
+# 🧠 Session State
+# =========================
+if "qa_chain" not in st.session_state:
+    st.session_state.qa_chain = None
 
 if "messages" not in st.session_state:
-    st.session_state.messages=[]
+    st.session_state.messages = []
 
-# Document processing 
-def process_document(file):
-    """Processes the uploaded PDF document and creates the agent."""
-    # Load the PDF document
-    loader=PyPDFDirectoryLoader(file)
-    docs=loader.load()
+# =========================
+# 📂 PROCESS PDFs
+# =========================
+def process_pdfs(uploaded_files):
+    docs = []
 
-    # Split the document into smaller chunks
-    splitter=RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=200)
-    docs=splitter.split_documents(documents=docs)
+    os.makedirs("docs", exist_ok=True)
 
-    # Embeddings and vector store
-    embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-2-preview")
-    
-    vector_db=InMemoryVectorStore.from_documents(
-        documents=docs, 
+    # Load PDFs
+    for file in uploaded_files:
+        file_path = os.path.join("docs", file.name)
+
+        with open(file_path, "wb") as f:
+            f.write(file.getvalue())
+
+        loader = PyPDFLoader(file_path)
+        docs.extend(loader.load())
+
+    # Split documents
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=100
+    )
+    split_docs = splitter.split_documents(docs)
+
+    # Embeddings (Best free model)
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
+
+    # Vector DB
+    vector_db = InMemoryVectorStore.from_documents(
+        split_docs,
         embedding=embeddings
     )
 
-    # Create a Agent--LLM, Tool and prompt
-    llm = ChatGroq(model="openai/gpt-oss-20b")
-
-    @tool
-    def retrieve_context(query:str):
-        """Retrieves relevant context from the vector store based on the query."""
-        context=""
-        docs=vector_db.similarity_search(query=query,k=4)
-        for doc in docs:
-            context+=doc.page_content
-        return context    
-
-    system_prompt = """You are a helpful assistant.
-    ALWAYS use the retrieve_context tool to get relevant information from the document before answering.
-    Do NOT answer from your own knowledge.
-    After retrieving context, answer strictly based on it.
-    """
-
-    memory=InMemorySaver()
-
-    agent=create_agent(
-        model=llm,
-        tools=[retrieve_context],
-        system_prompt=system_prompt,
-        checkpointer=memory
+    # LLM
+    llm = ChatGroq(
+        model="llama3-8b-8192",  # fast + stable
+        temperature=0
     )
 
-    st.session_state.agent=agent
-    st.session_state.document_uploaded=True
+    # Retriever
+    retriever = vector_db.as_retriever(search_kwargs={"k": 4})
 
+    # Prompt (STRICT)
+    prompt = ChatPromptTemplate.from_template("""
+You are a PDF assistant.
 
-# Upload file and ask questions in Streamlit
+Rules:
+1. Answer ONLY from the given context
+2. If answer is not in context, say: "Not found in document"
+3. Keep answer clear and structured
+
+Context:
+{context}
+
+Question:
+{input}
+""")
+
+    # Chains
+    document_chain = create_stuff_documents_chain(llm, prompt)
+    qa_chain = create_retrieval_chain(retriever, document_chain)
+
+    return qa_chain
+
+# =========================
+# 📂 SIDEBAR
+# =========================
 with st.sidebar:
-    st.header("📂 Upload Documents")
+    st.header("📂 Upload PDFs")
 
-    uploaded = st.file_uploader(
-        "Upload PDF files",
+    uploaded_files = st.file_uploader(
+        "Upload PDFs",
         type=["pdf"],
         accept_multiple_files=True
     )
 
-    if uploaded and not st.session_state.document_uploaded:
-        with st.spinner("Processing..."):
-            path = "./docs_files"
-
-            import os
-            os.makedirs(path, exist_ok=True)
-
-            for file in uploaded:
-                with open(f"{path}/{file.name}", "wb") as f:
-                    f.write(file.getvalue())
-
-            process_document(path)
-            st.success("✅ Documents processed!")
-
-    st.markdown("---")
+    if uploaded_files:
+        with st.spinner("Processing PDFs..."):
+            st.session_state.qa_chain = process_pdfs(uploaded_files)
+        st.success("✅ PDFs processed!")
 
     if st.button("🧹 Clear Chat"):
         st.session_state.messages = []
         st.rerun()
 
+# =========================
+# 💬 CHAT UI
+# =========================
+if st.session_state.qa_chain:
 
+    st.markdown("### 💬 Chat with your PDF")
 
+    # Show chat history
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-# Chat interface
-if st.session_state.document_uploaded and st.session_state.agent:
-
-    st.markdown("### 💬 Chat with your document")
-
-    # Chat container
-    chat_container = st.container()
-
-    with chat_container:
-        for msg in st.session_state.messages:
-            if msg["role"] == "user":
-                st.chat_message("user").markdown(msg["content"])
-            else:
-                st.chat_message("assistant").markdown(msg["content"])
-
-    # Input box
+    # Input
     user_input = st.chat_input("Ask something from your PDF...")
 
     if user_input:
-        st.session_state.messages.append({
-            "role": "user",
-            "content": user_input
-        })
+        st.session_state.messages.append({"role": "user", "content": user_input})
 
-        st.chat_message("user").markdown(user_input)
+        with st.chat_message("user"):
+            st.markdown(user_input)
 
         with st.spinner("🤖 Thinking..."):
+            response = st.session_state.qa_chain.invoke({"input": user_input})
 
-            response = st.session_state.agent.invoke(
-                {"messages":[{"role":"user","content":user_input}]},
-                {"configurable":{"thread_id":1}}
-            )
+            answer = response["answer"]
+            sources = response.get("context", [])
 
-            answer = response["messages"][-1].content
+        with st.chat_message("assistant"):
+            st.markdown(answer)
 
-            st.chat_message("assistant").markdown(answer)
+            # 🔍 Show sources
+            with st.expander("📄 Source Context"):
+                for i, doc in enumerate(sources):
+                    st.markdown(f"**Chunk {i+1}:**")
+                    st.write(doc.page_content[:500])
 
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": answer
-            })
-    
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+
+else:
+    st.info("👈 Upload PDF to start chatting")
