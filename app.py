@@ -42,37 +42,30 @@ if "messages" not in st.session_state:
 # ---------------- Process Document ----------------
 def process_document(path):
 
-    # Load PDFs
     loader = PyPDFDirectoryLoader(path)
     docs = loader.load()
 
-    # Split
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=800,
         chunk_overlap=200
     )
     docs = splitter.split_documents(docs)
 
-    # Embeddings
     embeddings = GoogleGenerativeAIEmbeddings(
         model="gemini-embedding-2-preview"
     )
 
-    # Vector Store
     vector_db = InMemoryVectorStore.from_documents(
         documents=docs,
         embedding=embeddings
     )
 
-    st.session_state.vector_store = vector_db
-
-    # LLM
-    llm = ChatGroq(model="openai/gpt-oss-20b")
-
-    # 🔥 TOOL FIX (no @tool)
+    # ❗ IMPORTANT: vector_db को अंदर capture करो
     def retrieve_context_fn(query: str) -> str:
-        docs = st.session_state.vector_store.similarity_search(query, k=4)
+        docs = vector_db.similarity_search(query, k=4)
         return "\n".join([doc.page_content for doc in docs])
+
+    from langchain_core.tools import Tool
 
     retrieve_context = Tool(
         name="retrieve_context",
@@ -80,7 +73,8 @@ def process_document(path):
         description="Retrieve relevant context from uploaded PDF"
     )
 
-    # Prompt
+    llm = ChatGroq(model="openai/gpt-oss-20b")
+
     system_prompt = """You are a helpful assistant.
 ALWAYS use the retrieve_context tool.
 Answer ONLY from document.
