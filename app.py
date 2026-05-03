@@ -11,7 +11,7 @@ from langchain_community.vectorstores import InMemoryVectorStore
 from langchain.agents import create_agent
 from langchain_groq import ChatGroq
 from langgraph.checkpoint.memory import InMemorySaver
-from langchain.tools import Tool
+from langchain_core.tools import Tool
 
 # ---------------- UI ----------------
 st.set_page_config(
